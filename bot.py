@@ -1,63 +1,60 @@
-# file: promo_bot_ycf.py
-import os
-import json
-import asyncio
+import os, json, asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.helpers import escape_markdown
+from telegram.error import Forbidden, BadRequest
 
-# ---- ENVIRONMENT VARIABLES (set them in Yandex Cloud console) ----
-BOT_TOKEN    = os.environ["BOT_TOKEN"]            # e.g. 8016…VA   (never hard‑code!)
-CHANNEL_ID   = os.environ["CHANNEL_ID"]           # '@fitolooks'  OR  '-1001234567890'
-PROMO_CODE   = os.environ.get("PROMO_CODE", "Telegram_2025")
-CHANNEL_LINK = os.environ.get("CHANNEL_LINK", "https://t.me/fitolooks")
-# ------------------------------------------------------------------
+BOT_TOKEN   = os.environ["BOT_TOKEN"]
+_channel    = os.environ.get("CHANNEL_ID", "@fitolooks")
+CHANNEL_ID  = int(_channel) if _channel.startswith("-100") else _channel
+PROMO_CODE  = os.environ.get("PROMO_CODE", "Telegram_2025")
+CHANNEL_URL = "https://t.me/fitolooks"
 
-# Yandex Cloud Functions entry‑point
-def handler(event, context):
-    """
-    Called once per Telegram webhook delivery.
-    event["body"] is a JSON string representing the update.
-    """
-    # Because python-telegram-bot is asyncio‑based we need one event loop run:
-    asyncio.run(process_update(event["body"]))
-    return {
-        "statusCode": 200,
-        "body": "ok",
-        "headers": {"Content-Type": "text/plain"},
-    }
-
-async def process_update(body: str):
-    update = Update.de_json(json.loads(body), None)
-
-    # Build an Application object (lightweight, stateless)
-    app = (
-        ApplicationBuilder()
-        .token(BOT_TOKEN)
-        .build()
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        f"Здравствуйте! Я проверю вашу подписку на канал {CHANNEL_URL} "
+        "и вышлю промо‑код!"
     )
-    app.add_handler(CommandHandler("start", start))
 
-    # Feed the single update to the dispatcher
+    try:
+        member = await ctx.bot.get_chat_member(CHANNEL_ID, update.effective_user.id)
+        subscribed = member.status in ("member", "administrator", "creator")
+    except (Forbidden, BadRequest):
+        subscribed = False
+
+    if subscribed:
+        code_md = escape_markdown(PROMO_CODE, version=2)
+        await update.message.reply_text(
+            f"🎉 Ваш промокод: *{code_md}*",
+            parse_mode="MarkdownV2"
+        )
+    else:
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("👉 Подписаться", url=CHANNEL_URL)]]
+        )
+        await update.message.reply_text(
+            "Похоже, вы ещё не подписаны на канал.\n"
+            "Нажмите кнопку, подпишитесь и снова отправьте /start.",
+            reply_markup=kb,
+        )
+
+async def _process(body: str):
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    update = Update.de_json(json.loads(body), app.bot)
+
+    app.add_handler(CommandHandler("start", cmd_start))
+
     await app.initialize()
     await app.process_update(update)
     await app.shutdown()
 
-async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    # 1. Verify subscription
-    member = await ctx.bot.get_chat_member(CHANNEL_ID, user.id)
-    if member.status in ("member", "administrator", "creator"):
-        await update.message.reply_text(
-            f"🎉 Ваш промокод: **{PROMO_CODE}**\n"
-            "Используйте его на сайте fitolooks.com, чтобы получить бесплатный шампунь при любом заказе!",
-            parse_mode="Markdown"
-        )
-    else:
-        kb = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("👉 Подписаться", url=CHANNEL_LINK)]]
-        )
-        await update.message.reply_text(
-            "Сначала подпишитесь на канал и снова нажмите /start.",
-            reply_markup=kb,
-        )
+def handler(event, context):
+    body = event.get("body") if event else None
+    if not body:
+        return {"statusCode": 400, "body": "Empty request body"}
+    try:
+        asyncio.run(_process(body))
+    except Exception as exc:
+        print("ERROR while processing update:", exc)
+        return {"statusCode": 400, "body": f"Bad update: {exc}"}
+    return {"statusCode": 200, "body": ""}
